@@ -19,6 +19,7 @@
  *  and could serve as the starting point for developing your first PIN tool
  */
 
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <stdlib.h>
@@ -35,10 +36,16 @@ using trace_instr_format_t = input_instr;
 /* ================================================================== */
 
 UINT64 instrCount = 0;
+// UINT64 instCnt = 0;
 
-std::ofstream outfile;
+FILE* outfile = NULL;
 
 trace_instr_format_t curr_instr;
+
+// find boundary of executable
+UINT64 lowAddress = 0;
+UINT64 highAddress = 0;
+UINT64 loadOffset = 0;
 
 /* ===================================================================== */
 // Command line switches
@@ -87,9 +94,9 @@ BOOL ShouldWrite()
 
 void WriteCurrentInstruction()
 {
-  typename decltype(outfile)::char_type buf[sizeof(trace_instr_format_t)];
+  char buf[sizeof(trace_instr_format_t)];
   std::memcpy(buf, &curr_instr, sizeof(trace_instr_format_t));
-  outfile.write(buf, sizeof(trace_instr_format_t));
+  fwrite(buf, sizeof(trace_instr_format_t), 1, outfile);
 }
 
 void BranchOrNot(UINT32 taken)
@@ -113,6 +120,18 @@ void WriteToSet(T* begin, T* end, UINT32 r)
 // Is called for every instruction and instruments reads and writes
 VOID Instruction(INS ins, VOID* v)
 {
+
+  ADDRINT addr = INS_Address(ins);
+  if (addr < lowAddress || addr > highAddress) {
+    // only trace instructions in executable
+    return;
+  }
+  instrCount += 1;
+  if (instrCount <= KnobSkipInstructions.Value() || \
+    instrCount > (KnobTraceInstructions.Value() + KnobSkipInstructions.Value())) {
+    return;
+  }
+  
   // begin each instruction with this function
   INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)ResetCurrentInstruction, IARG_INST_PTR, IARG_END);
 
@@ -161,7 +180,24 @@ VOID Instruction(INS ins, VOID* v)
  * @param[in]   v               value specified by the tool in the
  *                              PIN_AddFiniFunction function call
  */
-VOID Fini(INT32 code, VOID* v) { outfile.close(); }
+VOID Fini(INT32 code, VOID* v)
+{ 
+  if (outfile) {
+    fclose(outfile);
+  }
+}
+
+VOID Image(IMG img, VOID *v)
+{
+    // get load address of executable
+    if (IMG_IsMainExecutable(img)) {
+        lowAddress = IMG_LowAddress(img);
+        highAddress = IMG_HighAddress(img);
+        loadOffset = IMG_LoadOffset(img);
+        printf("Found main executable @ %lx - %lx (offset %lx)\n", lowAddress, highAddress, loadOffset);
+    }
+}
+
 
 /*!
  * The main procedure of the tool.
@@ -177,11 +213,14 @@ int main(int argc, char* argv[])
   if (PIN_Init(argc, argv))
     return Usage();
 
-  outfile.open(KnobOutputFile.Value().c_str(), std::ios_base::binary | std::ios_base::trunc);
+  outfile = fopen(KnobOutputFile.Value().c_str(), "wb");
   if (!outfile) {
     std::cout << "Couldn't open output trace file. Exiting." << std::endl;
     exit(1);
   }
+
+  // Register function to be called upon loading image
+  IMG_AddInstrumentFunction(Image, 0);
 
   // Register function to be called to instrument instructions
   INS_AddInstrumentFunction(Instruction, 0);
